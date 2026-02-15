@@ -11,13 +11,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-// In-memory session store
 const sessions = new Map();
 
-// Health check
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// Create a session with call context (called by Edge Function before making Twilio call)
 app.post("/session", (req, res) => {
   const sessionId = uuidv4();
   const { prompt, callId, contactName, voiceId, language } = req.body;
@@ -36,11 +33,9 @@ app.post("/session", (req, res) => {
   res.json({ sessionId });
 });
 
-// TwiML endpoint - Twilio calls this to get instructions
 app.post("/twiml", (req, res) => {
   const sessionId = req.query.sessionId;
   const host = req.headers.host;
-  const protocol = req.headers["x-forwarded-proto"] || "https";
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -54,14 +49,10 @@ app.post("/twiml", (req, res) => {
   res.type("text/xml").send(twiml);
 });
 
-// Create HTTP server
 const server = http.createServer(app);
-
-// WebSocket server for Twilio Media Streams
 const wss = new WebSocket.Server({ server, path: "/media-stream" });
 
 wss.on("connection", (twilioWs, req) => {
-  // Try to get sessionId from URL (fallback), but primarily from Twilio start event
   const url = new URL(req.url, `http://${req.headers.host}`);
   let sessionId = url.searchParams.get("sessionId");
   let session = sessionId ? sessions.get(sessionId) : null;
@@ -73,10 +64,8 @@ wss.on("connection", (twilioWs, req) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // Connect to OpenAI Realtime API
   const connectOpenAI = () => {
-    const wsUrl =
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+    const wsUrl = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 
     openaiWs = new WebSocket(wsUrl, {
       headers: {
@@ -90,7 +79,6 @@ wss.on("connection", (twilioWs, req) => {
 
       const openaiVoice = "coral";
 
-      // Configure session
       openaiWs.send(
         JSON.stringify({
           type: "session.update",
@@ -102,6 +90,7 @@ wss.on("connection", (twilioWs, req) => {
             output_audio_format: "g711_ulaw",
             input_audio_transcription: {
               model: "whisper-1",
+              language: session.language || "he",
             },
             turn_detection: {
               type: "server_vad",
@@ -126,9 +115,7 @@ wss.on("connection", (twilioWs, req) => {
     });
 
     openaiWs.on("close", (code, reason) => {
-      console.log(
-        `OpenAI disconnected for session ${sessionId}: ${code} ${reason}`
-      );
+      console.log(`OpenAI disconnected for session ${sessionId}: ${code} ${reason}`);
       openaiReady = false;
     });
 
@@ -141,7 +128,6 @@ wss.on("connection", (twilioWs, req) => {
     switch (event.type) {
       case "session.created":
         console.log(`OpenAI session created for ${sessionId}`);
-        // Send initial greeting - let the AI speak first
         openaiWs.send(
           JSON.stringify({
             type: "response.create",
@@ -153,7 +139,6 @@ wss.on("connection", (twilioWs, req) => {
         break;
 
       case "response.audio.delta":
-        // Send audio back to Twilio
         if (streamSid && event.delta) {
           twilioWs.send(
             JSON.stringify({
@@ -202,7 +187,6 @@ wss.on("connection", (twilioWs, req) => {
     }
   };
 
-  // Handle Twilio messages
   twilioWs.on("message", (msg) => {
     try {
       const data = JSON.parse(msg.toString());
@@ -216,22 +200,18 @@ wss.on("connection", (twilioWs, req) => {
           streamSid = data.start.streamSid;
           callSid = data.start.callSid;
 
-          // Get sessionId from Twilio custom parameters (primary method)
           if (!session && data.start.customParameters?.sessionId) {
             sessionId = data.start.customParameters.sessionId;
             session = sessions.get(sessionId);
           }
 
           if (!session) {
-            console.error(`No valid session found. sessionId=${sessionId}, customParams=${JSON.stringify(data.start.customParameters)}`);
+            console.error(`No valid session found. sessionId=${sessionId}`);
             twilioWs.close();
             return;
           }
 
-          console.log(
-            `Twilio stream started: sessionId=${sessionId}, streamSid=${streamSid}, callSid=${callSid}`
-          );
-          // Now connect to OpenAI
+          console.log(`Twilio stream started: sessionId=${sessionId}, streamSid=${streamSid}, callSid=${callSid}`);
           connectOpenAI();
           break;
 
@@ -269,7 +249,6 @@ wss.on("connection", (twilioWs, req) => {
   });
 });
 
-// Handle call end - post results back to Supabase
 async function handleCallEnd(sessionId, callSid) {
   const session = sessions.get(sessionId);
   if (!session || session._ended) return;
@@ -281,9 +260,7 @@ async function handleCallEnd(sessionId, callSid) {
     .map((t) => `${t.role === "user" ? "לקוח" : "סוכן"}: ${t.text}`)
     .join("\n");
 
-  console.log(
-    `Call ended for session ${sessionId}. Duration: ${duration}s, Transcript length: ${transcriptStr.length}`
-  );
+  console.log(`Call ended for session ${sessionId}. Duration: ${duration}s, Transcript length: ${transcriptStr.length}`);
 
   if (SUPABASE_URL && SUPABASE_ANON_KEY && session.callId) {
     try {
@@ -310,9 +287,7 @@ async function handleCallEnd(sessionId, callSid) {
       if (resp.ok) {
         console.log(`Results posted to Supabase for call ${session.callId}`);
       } else {
-        console.error(
-          `Failed to post results: ${resp.status} ${await resp.text()}`
-        );
+        console.error(`Failed to post results: ${resp.status} ${await resp.text()}`);
       }
     } catch (err) {
       console.error("Failed to post call results:", err);
@@ -322,7 +297,6 @@ async function handleCallEnd(sessionId, callSid) {
   setTimeout(() => sessions.delete(sessionId), 5 * 60 * 1000);
 }
 
-// Cleanup old sessions every 30 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions) {
