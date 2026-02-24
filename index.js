@@ -61,7 +61,6 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: "/media-stream" });
 
 wss.on("connection", (twilioWs, req) => {
-  // Try to get sessionId from URL (fallback), but primarily from Twilio start event
   const url = new URL(req.url, `http://${req.headers.host}`);
   let sessionId = url.searchParams.get("sessionId");
   let session = sessionId ? sessions.get(sessionId) : null;
@@ -76,7 +75,7 @@ wss.on("connection", (twilioWs, req) => {
   // Connect to OpenAI Realtime API
   const connectOpenAI = () => {
     const wsUrl =
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+      "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5";
 
     openaiWs = new WebSocket(wsUrl, {
       headers: {
@@ -88,8 +87,7 @@ wss.on("connection", (twilioWs, req) => {
     openaiWs.on("open", () => {
       console.log(`OpenAI Realtime connected for session ${sessionId}`);
 
-      // Map voice to OpenAI voice
-      const openaiVoice = "coral"; // Warm female voice, closest to Marry Ann character
+      const openaiVoice = "coral";
 
       // Configure session
       openaiWs.send(
@@ -108,8 +106,8 @@ wss.on("connection", (twilioWs, req) => {
             turn_detection: {
               type: "server_vad",
               threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 600,
+              prefix_padding_ms: 20,
+              silence_duration_ms: 20,
             },
           },
         })
@@ -143,12 +141,10 @@ wss.on("connection", (twilioWs, req) => {
     switch (event.type) {
       case "session.created":
         console.log(`OpenAI session created for ${sessionId}`);
-        // Do NOT send response.create here — wait for session.updated
         break;
 
       case "session.updated":
         console.log(`OpenAI session configured for ${sessionId}, sending initial greeting`);
-        // Now audio format is set — safe to trigger first response
         openaiWs.send(
           JSON.stringify({
             type: "response.create",
@@ -160,14 +156,13 @@ wss.on("connection", (twilioWs, req) => {
         break;
 
       case "response.audio.delta":
-        // Send audio back to Twilio
         if (streamSid && event.delta) {
           twilioWs.send(
             JSON.stringify({
               event: "media",
               streamSid,
               media: {
-                payload: event.delta, // Already base64 g711_ulaw
+                payload: event.delta,
               },
             })
           );
@@ -175,7 +170,6 @@ wss.on("connection", (twilioWs, req) => {
         break;
 
       case "response.audio_transcript.done":
-        // Agent's complete transcript
         if (event.transcript) {
           session.transcript.push({
             role: "agent",
@@ -186,7 +180,6 @@ wss.on("connection", (twilioWs, req) => {
         break;
 
       case "conversation.item.input_audio_transcription.completed":
-        // User's transcript
         if (event.transcript) {
           session.transcript.push({
             role: "user",
@@ -197,7 +190,6 @@ wss.on("connection", (twilioWs, req) => {
         break;
 
       case "input_audio_buffer.speech_started":
-        // User started speaking - interrupt if AI is talking
         twilioWs.send(
           JSON.stringify({
             event: "clear",
@@ -226,7 +218,6 @@ wss.on("connection", (twilioWs, req) => {
           streamSid = data.start.streamSid;
           callSid = data.start.callSid;
 
-          // Get sessionId from Twilio custom parameters (primary method)
           if (!session && data.start.customParameters?.sessionId) {
             sessionId = data.start.customParameters.sessionId;
             session = sessions.get(sessionId);
@@ -241,17 +232,15 @@ wss.on("connection", (twilioWs, req) => {
           console.log(
             `Twilio stream started: sessionId=${sessionId}, streamSid=${streamSid}, callSid=${callSid}`
           );
-          // Now connect to OpenAI
           connectOpenAI();
           break;
 
         case "media":
-          // Forward audio to OpenAI
           if (openaiReady && openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(
               JSON.stringify({
                 type: "input_audio_buffer.append",
-                audio: data.media.payload, // base64 g711_ulaw
+                audio: data.media.payload,
               })
             );
           }
@@ -288,7 +277,6 @@ async function handleCallEnd(sessionId, callSid) {
 
   const duration = Math.round((Date.now() - session.createdAt) / 1000);
 
-  // Build transcript string
   const transcriptStr = session.transcript
     .map((t) => `${t.role === "user" ? "לקוח" : "סוכן"}: ${t.text}`)
     .join("\n");
@@ -297,7 +285,6 @@ async function handleCallEnd(sessionId, callSid) {
     `Call ended for session ${sessionId}. Duration: ${duration}s, Transcript length: ${transcriptStr.length}`
   );
 
-  // Post results to Supabase Edge Function
   if (SUPABASE_URL && SUPABASE_ANON_KEY && session.callId) {
     try {
       const resp = await fetch(
@@ -332,7 +319,6 @@ async function handleCallEnd(sessionId, callSid) {
     }
   }
 
-  // Cleanup session after 5 minutes
   setTimeout(() => sessions.delete(sessionId), 5 * 60 * 1000);
 }
 
